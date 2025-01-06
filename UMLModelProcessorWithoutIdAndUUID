@@ -1,0 +1,170 @@
+package org.example;
+
+import java.io.File;
+import java.util.*;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.stream.Collectors;
+import javax.xml.parsers.DocumentBuilder;
+import javax.xml.parsers.DocumentBuilderFactory;
+import org.w3c.dom.*;
+
+public class UMLModelProcessorWithoutIdAndUUID {
+
+    // A class representing a UML Model Node
+    static class ModelNode {
+        String type;
+        String label;
+
+        public ModelNode(String type, String label) {
+            this.type = type;
+            this.label = label;
+        }
+
+        @Override
+        public String toString() {
+            return type + ":" + label;
+        }
+    }
+
+    // A class representing a UML Model
+    static class UMLModel {
+        List<ModelNode> nodes;
+        String source;
+
+        public UMLModel(String source) {
+            this.nodes = new ArrayList<>();
+            this.source = source;
+        }
+
+        public void addNode(ModelNode node) {
+            this.nodes.add(node);
+        }
+
+        public String getSource() {
+            return source;
+        }
+    }
+
+    // Normalize text by removing redundant spaces and line breaks
+    public static String normalizeText(String text) {
+        if (text == null) return "";
+        text = text.replaceAll("\\s+", " ").trim(); // Replace multiple spaces with a single space
+        return text;
+    }
+
+    // Parse an XMI file using DOM, ignoring xmi:id, uuid, and other irrelevant attributes
+    public static UMLModel parseXMI(String filePath) throws Exception {
+        File file = new File(filePath);
+        DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+        DocumentBuilder builder = factory.newDocumentBuilder();
+        Document doc = builder.parse(file);
+        doc.getDocumentElement().normalize();
+
+        UMLModel model = new UMLModel(filePath);
+        NodeList packagedElements = doc.getElementsByTagName("packagedElement");
+
+        for (int i = 0; i < packagedElements.getLength(); i++) {
+            Element element = (Element) packagedElements.item(i);
+            String type = normalizeText(element.getAttribute("xsi:type"));
+            String name = normalizeText(element.getAttribute("name"));
+
+            // Ignore xmi:id and uuid attributes
+            if (!name.isEmpty() && !type.isEmpty()) {
+                model.addNode(new ModelNode(type, name));
+            }
+        }
+
+        return model;
+    }
+
+    // Generate the Normal Form of a UML Model, ignoring irrelevant attributes
+    public static String generateNormalForm(UMLModel model) {
+        List<String> normalizedNodes = model.nodes.stream()
+                .map(ModelNode::toString) // Use only type and label (name)
+                .sorted()
+                .collect(Collectors.toList());
+
+        return String.join("|", normalizedNodes);
+    }
+
+    // Compute a hash for the Normal Form
+    public static String computeHash(String normalForm) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(normalForm.getBytes());
+            StringBuilder hexString = new StringBuilder();
+            for (byte b : hash) {
+                String hex = Integer.toHexString(0xff & b);
+                if (hex.length() == 1) hexString.append('0');
+                hexString.append(hex);
+            }
+            return hexString.toString();
+        } catch (NoSuchAlgorithmException e) {
+            throw new RuntimeException("Hashing algorithm not available", e);
+        }
+    }
+
+    // Deduplicate models using Normal Form
+    public static Map<String, List<UMLModel>> deduplicateModels(List<UMLModel> models) {
+        Map<String, List<UMLModel>> duplicateGroups = new HashMap<>();
+
+        for (UMLModel model : models) {
+            String normalForm = generateNormalForm(model);
+            String hash = computeHash(normalForm);
+            duplicateGroups.putIfAbsent(hash, new ArrayList<>());
+            duplicateGroups.get(hash).add(model);
+        }
+
+        return duplicateGroups;
+    }
+
+    public static void main(String[] args) {
+        try {
+            System.out.println("Starting UMLModelProcessor...");
+
+            // Parse multiple UML models from XMI files
+            List<UMLModel> models = new ArrayList<>();
+            File folder = new File("C:\\Users\\raiha\\Desktop\\3 Semester\\WissArbeit\\repo-genmymodel-uml\\data");
+            System.out.println("Folder: " + folder.getAbsolutePath());
+
+            File[] files = folder.listFiles((dir, name) -> name.endsWith(".xmi"));
+            if (files == null || files.length == 0) {
+                System.out.println("No XMI files found in the directory.");
+                return;
+            }
+            System.out.println("Found " + files.length + " files.");
+
+            for (File file : files) {
+                try {
+                    UMLModel model = parseXMI(file.getAbsolutePath());
+                    models.add(model);
+                } catch (Exception e) {
+                    System.out.println("Failed to parse file: " + file.getAbsolutePath());
+                }
+            }
+
+            // Deduplicate models
+            Map<String, List<UMLModel>> duplicateGroups = deduplicateModels(models);
+            System.out.println("Processed deduplication.");
+
+            int duplicateCount = 0;
+            // Display duplicate groups with NormalForm
+            for (Map.Entry<String, List<UMLModel>> entry : duplicateGroups.entrySet()) {
+                if (entry.getValue().size() > 1) {
+                    duplicateCount++;
+                    System.out.println("Duplicate Group (Hash: " + entry.getKey() + "):");
+                    for (UMLModel duplicate : entry.getValue()) {
+                        System.out.println(" - Source: " + duplicate.getSource());
+                        System.out.println("   NormalForm: " + generateNormalForm(duplicate)); // Hier wird die Normalform ausgegeben
+                    }
+                }
+            }
+            System.out.println("Total number of duplicate groups: " + duplicateCount);
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+}
