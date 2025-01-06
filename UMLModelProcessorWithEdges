@@ -1,0 +1,216 @@
+package org.example;
+
+import java.io.File;
+import java.security.MessageDigest;
+import java.util.*;
+import java.util.stream.Collectors;
+import javax.xml.parsers.DocumentBuilder;
+import javax.xml.parsers.DocumentBuilderFactory;
+import org.w3c.dom.*;
+
+public class UMLModelProcessorWithEdges {
+
+    // A class representing a UML Model Node
+    static class ModelNode {
+        String id;
+        String type;
+        String label;
+
+        public ModelNode(String id, String type, String label) {
+            this.id = id;
+            this.type = type;
+            this.label = label;
+        }
+
+        @Override
+        public String toString() {
+            return type + ":" + label;
+        }
+    }
+
+    // A class representing a UML Model Edge
+    static class ModelEdge {
+        String sourceId;
+        String targetId;
+        String type;
+
+        public ModelEdge(String sourceId, String targetId, String type) {
+            this.sourceId = sourceId;
+            this.targetId = targetId;
+            this.type = type;
+        }
+
+        @Override
+        public String toString() {
+            return sourceId + "->" + targetId + ":" + type;
+        }
+    }
+
+    // A class representing a UML Model
+    static class UMLModel {
+        List<ModelNode> nodes = new ArrayList<>();
+        List<ModelEdge> edges = new ArrayList<>();
+        String source;
+
+        public UMLModel(String source) {
+            this.source = source;
+        }
+
+        public void addNode(ModelNode node) {
+            this.nodes.add(node);
+        }
+
+        public void addEdge(ModelEdge edge) {
+            this.edges.add(edge);
+        }
+
+        public int getNumberOfEdges() {
+            return edges.size();
+        }
+    }
+
+    public static String normalizeText(String text) {
+        if (text == null) return "";
+        return text.replaceAll("\\s+", " ").trim().toLowerCase();
+    }
+
+    public static UMLModel parseXMI(String filePath) throws Exception {
+        File file = new File(filePath);
+        DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+        DocumentBuilder builder = factory.newDocumentBuilder();
+        Document doc = builder.parse(file);
+        doc.getDocumentElement().normalize();
+
+        UMLModel model = new UMLModel(filePath);
+
+        // Parse nodes
+        NodeList nodes = doc.getElementsByTagName("packagedElement");
+        for (int i = 0; i < nodes.getLength(); i++) {
+            Element element = (Element) nodes.item(i);
+            String type = normalizeText(element.getAttribute("xsi:type"));
+            String name = normalizeText(element.getAttribute("name"));
+            if (!type.isEmpty() && !name.isEmpty()) {
+                model.addNode(new ModelNode(element.getAttribute("xmi:id"), type, name));
+            }
+        }
+
+        // Parse edges (relationships)
+        NodeList edges = doc.getElementsByTagName("relationship");
+        for (int i = 0; i < edges.getLength(); i++) {
+            Element element = (Element) edges.item(i);
+            String type = normalizeText(element.getAttribute("xsi:type"));
+            String sourceId = element.getAttribute("source");
+            String targetId = element.getAttribute("target");
+
+            if (!type.isEmpty() && !sourceId.isEmpty() && !targetId.isEmpty()) {
+                // Spezifische Beziehungstypen berücksichtigen
+                if (type.equals("uml:association")) {
+                    System.out.println("Association: " + sourceId + " -> " + targetId);
+                } else if (type.equals("uml:generalization")) {
+                    System.out.println("Generalization: " + sourceId + " -> " + targetId);
+                } else if (type.equals("uml:dependency")) {
+                    System.out.println("Dependency: " + sourceId + " -> " + targetId);
+                }
+
+                // Add edge to the model
+                ModelEdge edge = new ModelEdge(sourceId, targetId, type);
+                model.addEdge(edge);
+            }
+        }
+
+        return model;
+    }
+
+    public static Map<String, List<UMLModel>> deduplicateModels(List<UMLModel> models) {
+        Map<String, List<UMLModel>> duplicateGroups = new HashMap<>();
+
+        for (UMLModel model : models) {
+            String normalForm = generateNormalForm(model);
+            String hash = computeHash(normalForm);
+            duplicateGroups.putIfAbsent(hash, new ArrayList<>());
+            duplicateGroups.get(hash).add(model);
+        }
+
+        return duplicateGroups;
+    }
+
+    public static String generateNormalForm(UMLModel model) {
+        List<String> normalizedNodes = model.nodes.stream()
+                .map(ModelNode::toString)
+                .sorted()
+                .collect(Collectors.toList());
+
+        List<String> normalizedEdges = model.edges.stream()
+                .map(ModelEdge::toString)
+                .sorted()
+                .collect(Collectors.toList());
+
+        return String.join("|", normalizedNodes) + "||" + String.join("|", normalizedEdges);
+    }
+
+    public static String computeHash(String normalForm) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(normalForm.getBytes());
+            StringBuilder hexString = new StringBuilder();
+            for (byte b : hash) {
+                String hex = Integer.toHexString(0xff & b);
+                if (hex.length() == 1) hexString.append('0');
+                hexString.append(hex);
+            }
+            return hexString.toString();
+        } catch (Exception e) {
+            throw new RuntimeException("Hashing algorithm not available", e);
+        }
+    }
+
+
+
+    public static void main(String[] args) {
+        try {
+            System.out.println("Starting UMLModelProcessor...");
+
+            List<UMLModel> models = new ArrayList<>();
+            File folder = new File("C:\\Users\\raiha\\Desktop\\3 Semester\\WissArbeit\\repo-genmymodel-uml\\data");
+            File[] files = folder.listFiles((dir, name) -> name.endsWith(".xmi"));
+            if (files == null || files.length == 0) {
+                System.out.println("No XMI files found in the directory.");
+                return;
+            }
+
+            System.out.println("Found " + files.length + " files.");
+            for (File file : files) {
+                try {
+                    UMLModel model = parseXMI(file.getAbsolutePath());
+                    models.add(model);
+                } catch (Exception e) {
+                    System.out.println("Failed to parse file: " + file.getAbsolutePath());
+                    e.printStackTrace();
+                }
+            }
+
+            Map<String, List<UMLModel>> duplicateGroups = deduplicateModels(models);
+            System.out.println("Processed deduplication.");
+
+            int duplicateCount = 0;
+
+            System.out.println("Duplicate Groups:");
+            for (Map.Entry<String, List<UMLModel>> entry : duplicateGroups.entrySet()) {
+                List<UMLModel> group = entry.getValue();
+                if (group.size() > 1) {
+                    duplicateCount++;
+                    System.out.println("Hash: " + entry.getKey());
+                    System.out.println("  Anzahl der Modelle: " + group.size());
+                    group.forEach(model -> System.out.println("    File: " + model.source + ", Beziehungen: " + model.getNumberOfEdges()));
+                }
+            }
+
+            System.out.println("Total number of duplicate groups: " + duplicateCount);
+
+
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+}
