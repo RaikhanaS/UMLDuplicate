@@ -1,0 +1,491 @@
+package org.example;
+
+import java.io.File;
+import java.io.FileWriter;
+import java.io.PrintWriter;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.*;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+import javax.xml.parsers.DocumentBuilder;
+import javax.xml.parsers.DocumentBuilderFactory;
+import org.w3c.dom.*;
+
+public class DuplicateDetector {
+
+    static class ModelNode {
+        String type;
+        String label;
+        int index;
+
+        public ModelNode(String type, String label, int index) {
+            this.type = type;
+            this.label = label;
+            this.index = index;
+        }
+
+        @Override
+        public String toString() {
+            return index + ":" + type + ":" + label;
+        }
+    }
+
+    static class ModelEdge {
+        String type;
+        int sourceIndex;
+        int targetIndex;
+        String additionalInfo;
+
+        public ModelEdge(String type, int sourceIndex, int targetIndex, String additionalInfo) {
+            this.type = type;
+            this.sourceIndex = sourceIndex;
+            this.targetIndex = targetIndex;
+            this.additionalInfo = additionalInfo;
+        }
+
+        @Override
+        public String toString() {
+            return type + ":" + sourceIndex + "->" + targetIndex + (additionalInfo != null ? " [" + additionalInfo + "]" : "");
+        }
+    }
+
+    static class UMLModel {
+        List<ModelNode> nodes = new ArrayList<>();
+        List<ModelEdge> edges = new ArrayList<>();
+        Map<String, Integer> idToIndex = new HashMap<>();
+        String source;
+
+        public UMLModel(String source) {
+            this.source = source;
+        }
+
+        public void addNode(String id, String type, String label) {
+            int index = nodes.size();
+            ModelNode node = new ModelNode(type, label, index);
+            nodes.add(node);
+            if (id != null && !id.isEmpty()) {
+                idToIndex.put(id, index);
+            }
+        }
+
+        public void addEdge(String type, String sourceId, String targetId, String additionalInfo) {
+            Integer sourceIndex = idToIndex.get(sourceId);
+            Integer targetIndex = idToIndex.get(targetId);
+            if (sourceIndex != null && targetIndex != null) {
+                edges.add(new ModelEdge(type, sourceIndex, targetIndex, additionalInfo));
+            }
+        }
+    }
+
+    public static UMLModel parseXMI(String filePath) throws Exception {
+        File file = new File(filePath);
+        DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+        DocumentBuilder builder = factory.newDocumentBuilder();
+        Document doc = builder.parse(file);
+        doc.getDocumentElement().normalize();
+
+        UMLModel model = new UMLModel(filePath);
+        traverseAndExtract(doc.getDocumentElement(), model);
+        return model;
+    }
+
+    private static String getMultiplicity(Element end) {
+        String lower = "1";  // Default
+        String upper = "1";
+
+        NodeList children = end.getChildNodes();
+        for (int i = 0; i < children.getLength(); i++) {
+            if (children.item(i) instanceof Element) {
+                Element e = (Element) children.item(i);
+                if (e.getTagName().endsWith("lowerValue")) {
+                    String val = e.getAttribute("value");
+                    if (!val.isEmpty()) lower = val;
+                } else if (e.getTagName().endsWith("upperValue")) {
+                    String val = e.getAttribute("value");
+                    if (!val.isEmpty()) upper = val;
+                }
+            }
+        }
+
+        return lower.equals(upper) ? lower : lower + ".." + upper;
+    }
+
+
+    private static void traverseAndExtract(Node node, UMLModel model) {
+        if (node.getNodeType() != Node.ELEMENT_NODE) return;
+
+        Element element = (Element) node;
+        String id = element.getAttribute("xmi:id");
+        String type = element.getAttribute("xsi:type");
+        if (type == null || type.isEmpty()) {
+            type = element.getAttribute("xmi:type");
+        }
+        if ((type == null || type.isEmpty()) && element.getTagName() != null) {
+            type = element.getTagName();
+        }
+        String name = element.getAttribute("name");
+        if (type != null && !type.isEmpty()) {
+            model.addNode(id, type, name != null ? name : "");
+        }
+
+        for (String attr : List.of(
+                "source", "target", "client", "supplier", "memberEnd",
+                "incoming", "outgoing", "relatedElement", "end",
+                "message", "covered", "owner", "context", "redefinedElement"
+        )) {
+            if (element.hasAttribute(attr)) {
+                String[] targets = element.getAttribute(attr).split(" ");
+                for (String targetId : targets) {
+                    model.addEdge(attr, id, targetId, null);
+                }
+            }
+        }
+
+
+        if (element.hasAttribute("sourceRef") && element.hasAttribute("targetRef")) {
+            String sourceRef = element.getAttribute("sourceRef");
+            String targetRef = element.getAttribute("targetRef");
+            String tagName = element.getTagName();
+            model.addEdge(tagName, sourceRef, targetRef, null);
+        }
+
+        String tagName = element.getTagName();
+        if (tagName.equals("generalization")) {
+            String parent = element.getAttribute("general");
+            String child = element.getAttribute("specific");
+            model.addEdge("generalization", child, parent, null);
+        }
+        if (tagName.equals("interfaceRealization") || type.equals("uml:Realization")) {
+            String supplier = element.getAttribute("supplier");
+            String client = element.getAttribute("client");
+            model.addEdge("realization", client, supplier, null);
+        }
+        if (tagName.equals("dependency") || type.equals("uml:Dependency")) {
+            String supplier = element.getAttribute("supplier");
+            String client = element.getAttribute("client");
+            model.addEdge("dependency", client, supplier, null);
+        }
+        if (type.equals("uml:Usage")) {
+            String supplier = element.getAttribute("supplier");
+            String client = element.getAttribute("client");
+            model.addEdge("usage", client, supplier, null);
+        }
+        if (type.equals("uml:Abstraction")) {
+            String supplier = element.getAttribute("supplier");
+            String client = element.getAttribute("client");
+            model.addEdge("abstraction", client, supplier, null);
+        }
+        if (type.equals("uml:Include")) {
+            String source = element.getAttribute("includingCase");
+            String target = element.getAttribute("addition");
+            model.addEdge("include", source, target, null);
+        }
+        if (type.equals("uml:Extend")) {
+            String source = element.getAttribute("extendedCase");
+            String target = element.getAttribute("extension");
+            model.addEdge("extend", source, target, null);
+        }
+
+        if ("uml:ActivityEdge".equals(type)) {
+            String source = element.getAttribute("source");
+            String target = element.getAttribute("target");
+            model.addEdge("activityEdge", source, target, null);
+        }
+
+        if (type.equals("uml:Transition")) {
+            String source = element.getAttribute("source");
+            String target = element.getAttribute("target");
+            model.addEdge("transition", source, target, null);
+        }
+
+        if ("uml:Message".equals(type)) {
+            String sendEvent = element.getAttribute("sendEvent");
+            String receiveEvent = element.getAttribute("receiveEvent");
+            if (!sendEvent.isEmpty()) model.addEdge("sendEvent", id, sendEvent, null);
+            if (!receiveEvent.isEmpty()) model.addEdge("receiveEvent", id, receiveEvent, null);
+        }
+
+        if ("uml:ExecutionSpecification".equals(type)) {
+            String start = element.getAttribute("start");
+            String finish = element.getAttribute("finish");
+            if (!start.isEmpty()) model.addEdge("start", id, start, null);
+            if (!finish.isEmpty()) model.addEdge("finish", id, finish, null);
+        }
+
+        if ("uml:GeneralOrdering".equals(type)) {
+            String before = element.getAttribute("before");
+            String after = element.getAttribute("after");
+            if (!before.isEmpty() && !after.isEmpty()) {
+                model.addEdge("generalOrdering", before, after, null);
+            }
+        }
+
+        // --- Sequenzdiagramm-Erweiterung ---
+
+// Lifeline → Knoten und Beziehung zur dargestellten Klasse
+        if ("uml:Lifeline".equals(type)) {
+            String represents = element.getAttribute("represents");
+            model.addNode(id, type, name != null ? name : "");
+            if (!represents.isEmpty()) {
+                model.addEdge("represents", id, represents, null);
+            }
+        }
+
+// Interaction → Knoten
+        if ("uml:Interaction".equals(type)) {
+            model.addNode(id, type, name != null ? name : "");
+        }
+
+// CombinedFragment → Knoten mit Operatorinfo
+        if ("uml:CombinedFragment".equals(type)) {
+            String operator = element.getAttribute("interactionOperator");
+            model.addNode(id, type, operator != null ? operator : "");
+        }
+
+// InteractionOperand → Knoten (Optional: übergeordnete Beziehung setzen)
+        if ("uml:InteractionOperand".equals(type)) {
+            model.addNode(id, type, "");
+        }
+
+// InteractionUse → Kante zu verwendeter Interaktion
+        if ("uml:InteractionUse".equals(type)) {
+            String refersTo = element.getAttribute("refersTo");
+            if (!refersTo.isEmpty()) {
+                model.addEdge("interactionUse", id, refersTo, null);
+            }
+        }
+
+// OccurrenceSpecification → Knoten + optionale before/after-Beziehungen
+        if ("uml:OccurrenceSpecification".equals(type)) {
+            model.addNode(id, type, "");
+            if (element.hasAttribute("before")) {
+                String[] beforeTargets = element.getAttribute("before").split(" ");
+                for (String target : beforeTargets) {
+                    model.addEdge("before", id, target, null);
+                }
+            }
+            if (element.hasAttribute("after")) {
+                String[] afterTargets = element.getAttribute("after").split(" ");
+                for (String target : afterTargets) {
+                    model.addEdge("after", target, id, null);
+                }
+            }
+        }
+
+        if (type.equals("uml:SendSignalAction")) {
+            String signal = element.getAttribute("signal");
+            String target = element.getAttribute("target");
+            if (!signal.isEmpty()) model.addEdge("signal", id, signal, null);
+            if (!target.isEmpty()) model.addEdge("target", id, target, null);
+        }
+
+        // TemplateBinding – Verbindung zur gebundenen Vorlage
+        if (type.equals("uml:TemplateBinding")) {
+            String boundElement = element.getAttribute("boundElement");
+            if (!boundElement.isEmpty()) {
+                model.addEdge("boundElement", id, boundElement, null);
+            }
+
+            NodeList substitutions = element.getElementsByTagName("parameterSubstitution");
+            for (int i = 0; i < substitutions.getLength(); i++) {
+                Element sub = (Element) substitutions.item(i);
+                String actual = sub.getAttribute("actual");
+                if (!actual.isEmpty()) {
+                    model.addEdge("parameterSubstitution", id, actual, null);
+                }
+            }
+        }
+
+// Substitution – ersetzt einen Vertragstyp durch eine konkrete Klasse
+        if (type.equals("uml:Substitution")) {
+            String contract = element.getAttribute("contract");
+            String substitutingClassifier = element.getAttribute("substitutingClassifier");
+
+            if (!contract.isEmpty()) {
+                model.addEdge("contract", id, contract, null);
+            }
+            if (!substitutingClassifier.isEmpty()) {
+                model.addEdge("substitutingClassifier", id, substitutingClassifier, null);
+            }
+        }
+
+// InformationFlow – Quelle/Ziel der Informationsübertragung
+        if (type.equals("uml:InformationFlow")) {
+            String infoSources = element.getAttribute("informationSource");
+            String infoTargets = element.getAttribute("informationTarget");
+
+            for (String src : infoSources.split(" ")) {
+                if (!src.isEmpty()) model.addEdge("informationSource", id, src, null);
+            }
+
+            for (String tgt : infoTargets.split(" ")) {
+                if (!tgt.isEmpty()) model.addEdge("informationTarget", id, tgt, null);
+            }
+
+            String realizingConnector = element.getAttribute("realization");
+            if (!realizingConnector.isEmpty()) {
+                model.addEdge("realization", id, realizingConnector, null);
+            }
+        }
+
+// RedefinableTemplateSignature – Parameter einer Vorlage
+        if (type.equals("uml:RedefinableTemplateSignature")) {
+            String ownedParameters = element.getAttribute("ownedParameter");
+            for (String param : ownedParameters.split(" ")) {
+                if (!param.isEmpty()) model.addEdge("ownedParameter", id, param, null);
+            }
+        }
+
+// ClassifierTemplateParameter – verbindet mit Parameter
+        if (type.equals("uml:ClassifierTemplateParameter")) {
+            String parameteredElement = element.getAttribute("parameteredElement");
+            if (!parameteredElement.isEmpty()) {
+                model.addEdge("parameteredElement", id, parameteredElement, null);
+            }
+
+            String constrainingClassifier = element.getAttribute("constrainingClassifier");
+            if (!constrainingClassifier.isEmpty()) {
+                model.addEdge("constrainingClassifier", id, constrainingClassifier, null);
+            }
+        }
+
+        if (type.equals("uml:Node") || type.equals("uml:Device") || type.equals("uml:ExecutionEnvironment")) {
+            if (element.hasAttribute("deployment")) {
+                for (String deployment : element.getAttribute("deployment").split(" ")) {
+                    model.addEdge("deployment", id, deployment, null);
+                }
+            }
+            if (element.hasAttribute("deployedArtifact")) {
+                for (String artifact : element.getAttribute("deployedArtifact").split(" ")) {
+                    model.addEdge("deployedArtifact", id, artifact, null);
+                }
+            }
+        }
+
+        if (type.equals("uml:Artifact") && element.hasAttribute("manifestation")) {
+            for (String man : element.getAttribute("manifestation").split(" ")) {
+                model.addEdge("manifestation", id, man, null);
+            }
+        }
+
+
+        if (tagName.equals("packagedElement") && ("uml:Association".equals(type) || "Association".equals(type))) {
+            NodeList children = element.getChildNodes();
+            String source = null;
+            String target = null;
+            String aggregation = "";
+            String multiplicity = "";
+
+            for (int i = 0; i < children.getLength(); i++) {
+                Node child = children.item(i);
+                if (child.getNodeType() == Node.ELEMENT_NODE && ((Element) child).getTagName().equals("ownedEnd")) {
+                    Element ownedEnd = (Element) child;
+                    String endType = ownedEnd.getAttribute("type");
+                    String agg = ownedEnd.getAttribute("aggregation");
+                    String mult = getMultiplicity(ownedEnd);
+
+                    if (source == null) source = endType;
+                    else if (target == null) target = endType;
+
+                    aggregation += (agg.isEmpty() ? "none" : agg) + "/";
+                    multiplicity += mult + "/";
+                }
+            }
+
+            if (source != null && target != null) {
+                // remove trailing slash from aggregation and multiplicity
+                if (aggregation.endsWith("/")) aggregation = aggregation.substring(0, aggregation.length() - 1);
+                if (multiplicity.endsWith("/")) multiplicity = multiplicity.substring(0, multiplicity.length() - 1);
+
+                model.addEdge("association", source, target, aggregation + ", " + multiplicity);
+            }
+        }
+
+        if (Set.of("controlFlow", "objectFlow", "connector", "associationClass").contains(tagName)) {
+            String source = element.getAttribute("source") != null ? element.getAttribute("source") : element.getAttribute("client");
+            String target = element.getAttribute("target") != null ? element.getAttribute("target") : element.getAttribute("supplier");
+            model.addEdge(tagName, source, target, null);
+        }
+
+        NodeList children = element.getChildNodes();
+        for (int i = 0; i < children.getLength(); i++) {
+            traverseAndExtract(children.item(i), model);
+        }
+    }
+
+    public static String generateNormalForm(UMLModel model) {
+        List<String> normalizedNodes = model.nodes.stream()
+                .map(ModelNode::toString)
+                .sorted()
+                .collect(Collectors.toList());
+
+        List<String> normalizedEdges = model.edges.stream()
+                .map(ModelEdge::toString)
+                .sorted()
+                .collect(Collectors.toList());
+
+        return String.join("|", normalizedNodes) + "||" + String.join("|", normalizedEdges);
+    }
+
+    public static String computeHash(String normalForm) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(normalForm.getBytes());
+            StringBuilder hexString = new StringBuilder();
+            for (byte b : hash) {
+                String hex = Integer.toHexString(0xff & b);
+                if (hex.length() == 1) hexString.append('0');
+                hexString.append(hex);
+            }
+            return hexString.toString();
+        } catch (NoSuchAlgorithmException e) {
+            throw new RuntimeException("SHA-256 not available", e);
+        }
+    }
+
+    public static void main(String[] args) {
+        try {
+            File folder = new File("C:/Users/raiha/Desktop/3 Semester/WissArbeit/repo-genmymodel-uml/data");
+            File[] files = folder.listFiles((dir, name) -> name.endsWith(".xmi"));
+
+            if (files == null || files.length == 0) {
+                System.out.println("No XMI files found.");
+                return;
+            }
+
+            Map<String, List<String>> duplicateGroups = new HashMap<>();
+
+            for (File file : files) {
+                UMLModel model = parseXMI(file.getAbsolutePath());
+
+                System.out.println("File: " + file.getName() + ", Knoten: " + model.nodes.size() + ", Kanten: " + model.edges.size());
+                System.out.println("  Knoten sind: " + model.nodes.stream().map(Object::toString).collect(Collectors.joining(", ")));
+                System.out.println("  Kanten sind: " + model.edges.stream().map(Object::toString).collect(Collectors.joining(", ")));
+
+
+
+                // Normalform & Hash für Duplikatserkennung
+                String normalForm = generateNormalForm(model);
+                String hash = computeHash(normalForm);
+                duplicateGroups.computeIfAbsent(hash, k -> new ArrayList<>()).add(file.getName());
+            }
+
+            System.out.println("\nDuplicate Groups:");
+            duplicateGroups.forEach((hash, filesList) -> {
+                if (filesList.size() > 1) {
+                    System.out.println("Hash: " + hash + " | Count: " + filesList.size() + " | Files: " + filesList);
+                }
+            });
+
+            int duplicateFilesCount = duplicateGroups.values().stream()
+                    .mapToInt(list -> list.size() - 1)
+                    .sum();
+
+            System.out.println("Total number of duplicate files: " + duplicateFilesCount);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+}
