@@ -1,0 +1,42 @@
+import os
+import xml.etree.ElementTree as ET
+import pandas as pd
+from collections import Counter
+
+input_folder = r"C:\Users\raiha\Desktop\3 Semester\WissArbeit\repo-genmymodel-uml\data"
+
+output_path = r"C:\Users\raiha\Desktop\3 Semester\WissArbeit\node_type_summary.csv"
+
+global_counter = Counter()
+
+def extract_node_types(file_path):
+    try:
+        tree = ET.parse(file_path)
+        root = tree.getroot()
+        local_counter = Counter()
+
+        for elem in root.iter():
+            xsi_type = elem.attrib.get('{http://www.w3.org/2001/XMLSchema-instance}type') \
+                or elem.attrib.get('{http://schema.omg.org/spec/XMI/2.1}type') \
+                or elem.attrib.get('xsi:type') \
+                or elem.attrib.get('xmi:type')
+
+            if xsi_type:
+                local_counter[xsi_type] += 1
+
+        return local_counter
+    except Exception as e:
+        print(f"Fehler bei {file_path}: {e}")
+        return Counter()
+
+# Alle Dateien verarbeiten und summieren
+for filename in os.listdir(input_folder):
+    if filename.endswith(".xmi"):
+        filepath = os.path.join(input_folder, filename)
+        counts = extract_node_types(filepath)
+        global_counter.update(counts)
+
+# In eine CSV schreiben
+df = pd.DataFrame(global_counter.items(), columns=["UMLType", "TotalCount"])
+df.sort_values("TotalCount", ascending=False).to_csv(output_path, index=False)
+print(f"Gesamte Zusammenfassung gespeichert: {output_path}")
