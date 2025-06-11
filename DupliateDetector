@@ -51,9 +51,24 @@ public class DuplicateDetector {
 
         @Override
         public String toString() {
-            return type + ":" + sourceLabel + "->" + targetLabel + (additionalInfo != null ? " [" + additionalInfo + "]" : "");
+            // NEU: Ungerichtete Kanten behandeln
+            if (isUndirected(type)) {
+                List<String> labels = Arrays.asList(sourceLabel, targetLabel);
+                Collections.sort(labels);
+                return type + ":" + labels.get(0) + "--" + labels.get(1)
+                        + (additionalInfo != null ? " [" + additionalInfo + "]" : "");
+            } else {
+                return type + ":" + sourceLabel + "->" + targetLabel
+                        + (additionalInfo != null ? " [" + additionalInfo + "]" : "");
+            }
+        }
+
+        // NEU: Definiert, welche Typen ungerichtet behandelt werden
+        private static boolean isUndirected(String type) {
+            return Set.of("association", "uml:Association", "hasAttribute").contains(type);
         }
     }
+
 
     static class UMLModel {
         List<ModelNode> nodes = new ArrayList<>();
@@ -339,7 +354,9 @@ public class DuplicateDetector {
 
         // Association via ownedEnd
         if (element.getTagName().equals("packagedElement") && type.contains("Association")) {
-            String source = null, target = null, aggregation = "", multiplicity = "";
+            String source = null, target = null;
+            String aggregation = "", multiplicity = "", roleNames = "";
+
             NodeList children = element.getChildNodes();
             for (int i = 0; i < children.getLength(); i++) {
                 Node child = children.item(i);
@@ -348,20 +365,32 @@ public class DuplicateDetector {
                     String endType = ownedEnd.getAttribute("type");
                     String agg = ownedEnd.getAttribute("aggregation");
                     String mult = getMultiplicity(ownedEnd);
+                    String role = ownedEnd.getAttribute("name");
+
+                    // Sicherstellen, dass Platzhalter verwendet werden, wenn leer
+                    if (agg.isEmpty()) agg = "none";
+                    if (mult.isEmpty()) mult = "1";
+                    if (role.isEmpty()) role = "-";
+
+                    aggregation += agg + "/";
+                    multiplicity += mult + "/";
+                    roleNames += role + "/";
 
                     if (source == null) source = endType;
                     else if (target == null) target = endType;
-
-                    aggregation += (agg.isEmpty() ? "none" : agg) + "/";
-                    multiplicity += mult + "/";
                 }
             }
+
             if (source != null && target != null) {
                 if (aggregation.endsWith("/")) aggregation = aggregation.substring(0, aggregation.length() - 1);
                 if (multiplicity.endsWith("/")) multiplicity = multiplicity.substring(0, multiplicity.length() - 1);
-                model.addEdge("association", source, target, aggregation + ", " + multiplicity);
+                if (roleNames.endsWith("/")) roleNames = roleNames.substring(0, roleNames.length() - 1);
+
+                String info = aggregation + ", " + multiplicity + "; role:" + roleNames;
+                model.addEdge("association", source, target, info);
             }
         }
+
 
 
         NodeList children = element.getChildNodes();
@@ -404,8 +433,8 @@ public class DuplicateDetector {
 
     public static void main(String[] args) {
         try {
-            //File folder = new File("C:/Users/raiha/Desktop/3 Semester/WissArbeit/repo-genmymodel-uml/data");
-            File folder = new File("C:/Users/raiha/Desktop/3 Semester/WissArbeit/testsxml");
+            File folder = new File("C:/Users/raiha/Desktop/3 Semester/WissArbeit/repo-genmymodel-uml/data");
+            //File folder = new File("C:/Users/raiha/Desktop/3 Semester/WissArbeit/testsxml");
             File[] files = folder.listFiles((dir, name) -> name.endsWith(".xmi"));
 
             if (files == null || files.length == 0) {
@@ -446,6 +475,9 @@ public class DuplicateDetector {
                     .sum();
 
             System.out.println("Total number of duplicate files: " + duplicateFilesCount);
+
+
+
         } catch (Exception e) {
             e.printStackTrace();
         }
